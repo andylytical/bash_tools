@@ -1,0 +1,129 @@
+#!/bin/bash
+
+
+###
+# SAMPLE USAGE
+# mmlscluster 2>/dev/null | awk '$2~/^lsst/ {print $2}' | ./test_ssh
+###
+
+###
+# Default use (no cmdline options) will perform a single depth pass in serial mode.
+#
+# Single depth will populate only the local ssh known_hosts file.
+#
+# Double depth (-d cmdline option) will populate known_hosts on all nodes.
+#
+# If GNU Parallel is installed, use -p cmdline option for speed improvement.
+###
+
+#PLOPTS=( --gnu --bg --bibtex --jobs 16)
+PLOPTS=( --gnu --jobs 10 )
+SSHOPTS=( -o BatchMode=yes -o ConnectTimeout=2 )
+
+function single_pass_serial {
+  for i in ${nodes[@]} ; do
+    echo -n "$i ... "
+    start=$(date "+%s")
+    response=$( ssh ${i} date )
+    end=$(date "+%s")
+    let "elapsed = $end - $start"
+    echo elapsed $elapsed
+  done
+}
+
+function double_pass_serial {
+  for i in ${nodes[@]} ; do
+    for j in ${nodes[@]} ; do
+      echo -n "Testing ${i} to ${j}: "
+      ssh ${i} "ssh ${j} date"
+    done
+  done
+}
+
+# connect to all hosts directly
+function single_pass_parallel {
+  parallel ${PLOPTS[@]} \
+    "ssh ${SSHOPTS[@]} {} \"hostname\" " \
+  :::  "${nodes[@]}"
+}
+
+function assert_equal {
+  rc=0
+  /bin/test $1 -eq $2 || {
+    echo "ERROR $1 != $2 ***"
+    rc=1
+  }
+  return $rc
+}
+
+#TODO - Improve use of parallel; See: 
+# https://www.gnu.org/software/parallel/man.html#EXAMPLE:-Rewriting-nested-for-loops
+
+function double_pass_parallel {
+  let "num_expected = ${#nodes[*]}"
+  for n in ${nodes[@]} ; do
+    echo
+    echo "--- FROM ALL TO $n ---"
+    num_responses=$( (
+    parallel ${PLOPTS[@]} \
+      "ssh ${SSHOPTS[@]} {} \"ssh $n hostname\" " \
+    :::  "${nodes[@]}"
+    ) | wc -l )
+    echo "Expected $num_expected, got $num_responses"
+    assert_equal $num_expected $num_responses && echo "OK"
+  done
+}
+
+# Process options
+DOUBLE=0
+PARALLEL=0
+while getopts ":2p" opt; do
+    case $opt in
+    2)  DOUBLE=1 ;;
+    p)  PARALLEL=1 ;;
+    \?)
+        echo "Invalid option: -$OPTARG" >&2
+        exit 1
+        ;;
+    :)
+        echo "Option -$OPTARG requires an argument." >&2
+        exit 1
+        ;;
+  esac
+done
+shift $((OPTIND-1))
+
+
+# Try to get nodes from cmdline (or from stdin)
+nodes=()
+if [[ $# -gt 0 ]] ; then
+  nodes=( $* )
+else
+  #try stdin for input
+  if [[ ! -t 0 ]]; then
+    while read line; do
+      nodes[${#nodes[*]}]=$line
+    done
+  fi
+fi
+
+if [[ ${#nodes[*]} -lt 1 ]] ; then
+  echo 'Missing node list' >&2
+  exit 1
+fi
+
+
+if [[ $DOUBLE -gt 0 ]] ; then
+  if [[ $PARALLEL -gt 0 ]] ; then
+    double_pass_parallel
+  else
+    double_pass_serial
+  fi
+else
+  if [[ $PARALLEL -gt 0 ]] ; then
+    single_pass_parallel
+  else
+    single_pass_serial
+  fi
+fi
+
